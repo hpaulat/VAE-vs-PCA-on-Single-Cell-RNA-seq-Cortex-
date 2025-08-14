@@ -78,8 +78,8 @@ class VAE(nn.Module):
             nn.Linear(input_dim, 256), nn.ReLU(),
             nn.Linear(256, 64), nn.ReLU()
         )
-        self.mu = nn.Linear(64, latent_dim)        # Predict mean vector
-        self.logvar = nn.Linear(64, latent_dim)        # Predict log-variance
+        self.mu = nn.Linear(64, latent_dim)       
+        self.logvar = nn.Linear(64, latent_dim)        
         self.dec = nn.Sequential(       # Mirrors the encoder but back to the input space
             nn.Linear(latent_dim, 64), nn.ReLU(),
             nn.Linear(64, 256), nn.ReLU(),
@@ -153,7 +153,7 @@ y_true = labels.cat.codes.to_numpy()
 K = len(labels.cat.categories)
 
 # --------- PCA ---------
-n_pcs = 16  # match your d_latent=16; you can also try 32/50 and compare
+n_pcs = 16 
 sc.tl.pca(adata, n_comps=n_pcs, svd_solver="arpack", random_state=SEED)
 X_pca = adata.obsm["X_pca"][:, :n_pcs]        # (n_cells, n_pcs)
 
