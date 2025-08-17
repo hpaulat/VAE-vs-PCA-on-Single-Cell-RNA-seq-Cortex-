@@ -107,6 +107,12 @@ def vae_loss(x, x_hat, mu, logvar, gene_w):
     kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return recon + kl, recon, kl
 
+# Labels
+label_col = "label"
+labels = adata.obs[label_col].astype("category")
+y_true = labels.cat.codes.to_numpy()
+K = len(labels.cat.categories)
+
 # Training
 d_in, d_latent = X.shape[1], 8         # input features and latent dimensionality for VAE
 device = "cpu"                                     
@@ -116,7 +122,7 @@ opt = torch.optim.Adam(model.parameters(), lr=1e-3)         # solid default for 
 # --- Make a torch tensor for the per-gene weights ---
 gene_w = torch.from_numpy(w).to(device)   # shape (d_in,)
 
-epochs = 50
+epochs = 100
 print(f"[Info] Training on {device} for {epochs} epochs...")
 for epoch in range(1, epochs + 1):
     model.train()           # good practice    
@@ -133,24 +139,27 @@ for epoch in range(1, epochs + 1):
         total_kl += kl.item()
     print(f"Epoch {epoch:03d} | loss/cell={total/len(ds):.2f} "
           f"(recon/cell={total_recon/len(ds):.2f}, kl/cell={total_kl/len(ds):.2f})")
+    
 
-# Extract latent Means VAE
-model.eval()        # Evaluation mode
-mu_chunks = []      # Collector list for batches of encoder means μ
-with torch.no_grad():       # Disables gradient tracking
-    for (xb,) in tud.DataLoader(ds, batch_size=1024, shuffle=False):        # Iterates over all cells
-        xb = xb.to(device)
-        mu, _ = model.encode(xb)        # Only runs encoder (not full forward pass)
-        mu_chunks.append(mu.cpu().numpy())      # Stitches all values into matrix
+    # Extract latent Means VAE
+    model.eval()        # Evaluation mode
+    mu_chunks = []      # Collector list for batches of encoder means μ
+    with torch.no_grad():       # Disables gradient tracking
+        for (xb,) in tud.DataLoader(ds, batch_size=1024, shuffle=False):        # Iterates over all cells
+            xb = xb.to(device)
+            mu, _ = model.encode(xb)        # Only runs encoder (not full forward pass)
+            mu_chunks.append(mu.cpu().numpy())      # Stitches all values into matrix
 
-Z = np.concatenate(mu_chunks, axis=0)       # Concatenates the per-batch arrays along rows (axis 0) to form the full latent matrix.
-print("[Check] Z shape:", Z.shape)      # Sanity Check       
+    Z = np.concatenate(mu_chunks, axis=0)       # Concatenates the per-batch arrays along rows (axis 0) to form the full latent matrix.
+    print("[Check] Z shape:", Z.shape)      # Sanity Check       
 
-# Labels
-label_col = "label"
-labels = adata.obs[label_col].astype("category")
-y_true = labels.cat.codes.to_numpy()
-K = len(labels.cat.categories)
+
+    Z_std = StandardScaler().fit_transform(Z)
+    km_vae = KMeans(n_clusters=K, n_init=100, random_state=SEED)
+    y_pred_vae = km_vae.fit_predict(Z_std)
+    ari_vae = adjusted_rand_score(y_true, y_pred_vae)
+    print(f"ARI (KMeans on VAE latent): {ari_vae:.4f}")
+
 
 # --------- PCA ---------
 n_pcs = 16 
