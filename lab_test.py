@@ -8,7 +8,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score
-import os, random, numpy as np, torch
+import os, random, torch
 
 SEED = 0  # CHATGPT code to keep runs consistent
 os.environ["PYTHONHASHSEED"] = str(SEED)
@@ -22,6 +22,9 @@ try:
     torch.use_deterministic_algorithms(True)
 except Exception:
     pass
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("[Info] Using device:", device)
+
 
 adata = sc.read_h5ad("/Users/hugopaulat/Desktop/projects/scanPyLabTest/cortex.h5ad")
 print("General AnnObject Info")
@@ -49,9 +52,9 @@ print("[HVG] using", adata.n_vars, "genes")
 disp = adata.var["dispersions_norm"].to_numpy()         # Per-gene normalized dispersion
 disp = np.nan_to_num(disp, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)      # Finds low quality values and sets to 0 --> asserts float32 type
 
-gamma = 3      # main knob
+gamma = 3     # main knob
 rng = np.ptp(disp) if np.ptp(disp) != 0 else 1.0  # calculates range for each gene
-w = 1.0 + gamma * (disp - disp.min()) / (rng + 1e-8)  # weights >= 1 for more variable genes
+w = 1.0 + gamma * (disp - disp.min()) / (rng + 1e-4)  # weights >= 1 for more variable genes
 w = w.astype(np.float32)
 
 # Keep overall loss scale comparable to unweighted MSE (avg weight ~ 1)
@@ -59,7 +62,8 @@ w *= (w.size / w.sum())
 
 
 # --------- VAE MODEL ---------
-X = np.asarray(adata.X, dtype=np.float32) 
+X = np.asarray(adata.X, dtype=np.float32)
+assert w.shape[0] == X.shape[1]
 print(f"[Check] X dimensions = {X.shape}, dtype = {X.dtype}, type = {type(X)}")
 
 # Data Loader
@@ -107,11 +111,31 @@ def vae_loss(x, x_hat, mu, logvar, gene_w):
     kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return recon + kl, recon, kl
 
-# Labels
+# Labels and ARI Calculator
 label_col = "label"
 labels = adata.obs[label_col].astype("category")
 y_true = labels.cat.codes.to_numpy()
 K = len(labels.cat.categories)
+eval_dl = tud.DataLoader(ds, batch_size=1024, shuffle=False)
+
+def ari_from_model(model, eval_dl, y_true, K, seed=SEED):
+    model.eval()                           # <- parentheses!
+    mu_chunks = []
+    with torch.no_grad():
+        for (xb,) in eval_dl:
+            xb = xb.to(device)
+            mu, _ = model.encode(xb)       # use μ (deterministic)
+            mu_chunks.append(mu.cpu().numpy())
+    Z = np.concatenate(mu_chunks, axis=0)  # (n_cells, d_latent)
+    Z_std = StandardScaler().fit_transform(Z)
+    y_pred = KMeans(n_clusters=K, n_init=100, random_state=seed).fit_predict(Z_std)
+    ari = adjusted_rand_score(y_true, y_pred)
+    return ari, Z
+
+def ari_from_array(X_rep, y_true, K, seed=SEED):
+    X_std = StandardScaler().fit_transform(X_rep)
+    y_pred = KMeans(n_clusters=K, n_init=100, random_state=seed).fit_predict(X_std)
+    return adjusted_rand_score(y_true, y_pred)
 
 # Training
 d_in, d_latent = X.shape[1], 8         # input features and latent dimensionality for VAE
@@ -122,75 +146,45 @@ opt = torch.optim.Adam(model.parameters(), lr=1e-3)         # solid default for 
 # --- Make a torch tensor for the per-gene weights ---
 gene_w = torch.from_numpy(w).to(device)   # shape (d_in,)
 
-epochs = 100
+epochs = 50
+warmup = 20
+
 print(f"[Info] Training on {device} for {epochs} epochs...")
 for epoch in range(1, epochs + 1):
-    model.train()           # good practice    
-    total, total_recon, total_kl = 0.0, 0.0, 0.0        # Accumulators to track summed losses across the epoch
-    for (xb,) in dl:    
-        xb = xb.to(device)          # Loads one mini-batch to device 
-        opt.zero_grad()         # Clears gradients from last iteration
+    model.train()
+    total = total_recon = total_kl = 0.0
+    for (xb,) in dl:
+        xb = xb.to(device)
+        opt.zero_grad()
         x_hat, mu, logvar = model(xb)
         loss, recon, kl = vae_loss(xb, x_hat, mu, logvar, gene_w=gene_w)
-        loss.backward()         # Backpropagation
-        opt.step()          # Optimizer update
-        total += loss.item()
-        total_recon += recon.item()         # Track losses
+
+        beta = min(1.0, epoch / warmup)          # <- warm-up (optional)
+        (recon + beta * kl).backward()           # instead of loss.backward()
+        opt.step()
+
+        total += (recon + kl).item()
+        total_recon += recon.item()
         total_kl += kl.item()
+
+    ari_epoch, _ = ari_from_model(model, eval_dl, y_true, K, seed=SEED)
     print(f"Epoch {epoch:03d} | loss/cell={total/len(ds):.2f} "
-          f"(recon/cell={total_recon/len(ds):.2f}, kl/cell={total_kl/len(ds):.2f})")
+          f"(recon/cell={total_recon/len(ds):.2f}, kl/cell={total_kl/len(ds):.2f}) "
+          f"| ARI={ari_epoch:.4f}")
     
-
-    # Extract latent Means VAE
-    model.eval()        # Evaluation mode
-    mu_chunks = []      # Collector list for batches of encoder means μ
-    with torch.no_grad():       # Disables gradient tracking
-        for (xb,) in tud.DataLoader(ds, batch_size=1024, shuffle=False):        # Iterates over all cells
-            xb = xb.to(device)
-            mu, _ = model.encode(xb)        # Only runs encoder (not full forward pass)
-            mu_chunks.append(mu.cpu().numpy())      # Stitches all values into matrix
-
-    Z = np.concatenate(mu_chunks, axis=0)       # Concatenates the per-batch arrays along rows (axis 0) to form the full latent matrix.
-    print("[Check] Z shape:", Z.shape)      # Sanity Check       
-
-
-    Z_std = StandardScaler().fit_transform(Z)
-    km_vae = KMeans(n_clusters=K, n_init=100, random_state=SEED)
-    y_pred_vae = km_vae.fit_predict(Z_std)
-    ari_vae = adjusted_rand_score(y_true, y_pred_vae)
-    print(f"ARI (KMeans on VAE latent): {ari_vae:.4f}")
-
-
-# --------- PCA ---------
+# --------- PCA and ARI alculation ---------
 n_pcs = 16 
 sc.tl.pca(adata, n_comps=n_pcs, svd_solver="arpack", random_state=SEED)
 X_pca = adata.obsm["X_pca"][:, :n_pcs]        # (n_cells, n_pcs)
 
+ari_vae_final, Z = ari_from_model(model, eval_dl, y_true, K, seed=SEED)
+ari_pca_final    = ari_from_array(X_pca, y_true, K, seed=SEED)
+print(f"[Final] ARI VAE: {ari_vae_final:.4f} | ARI PCA({n_pcs}): {ari_pca_final:.4f}")
+
 # --------- UMAP ---------
-def umap_embed(X, seed=0):
-    return umap.UMAP(n_neighbors=15, min_dist=0.1, metric="euclidean", random_state=SEED).fit_transform(X)
+def umap_embed(X, seed=SEED):
+    return umap.UMAP(n_neighbors=15, min_dist=0.1, metric="euclidean",
+                     random_state=seed).fit_transform(X)
 
-emb_vae = umap_embed(Z)         # UMAP of VAE latent
-emb_pca = umap_embed(X_pca)     # UMAP of PCA space
-codes = labels.cat.codes.to_numpy()
-fig, axes = plt.subplots(1, 2, figsize=(12, 5), dpi=120)
-
-axes[0].scatter(emb_vae[:,0], emb_vae[:,1], s=6, c=codes, cmap="tab20", rasterized=True)
-axes[0].set_title("VAE latent → UMAP"); axes[0].set_xlabel("UMAP1"); axes[0].set_ylabel("UMAP2")
-axes[1].scatter(emb_pca[:,0], emb_pca[:,1], s=6, c=codes, cmap="tab20", rasterized=True)
-axes[1].set_title(f"PCA ({n_pcs} PCs) → UMAP"); axes[1].set_xlabel("UMAP1"); axes[1].set_ylabel("UMAP2")
-
-plt.tight_layout(); plt.show()
-
-# --------- K-means + ARI Comparison ---------
-X_pca_std = StandardScaler().fit_transform(X_pca)  # helps K-means
-km_pca = KMeans(n_clusters=K, n_init=100, random_state=SEED)
-y_pred_pca = km_pca.fit_predict(X_pca_std)
-ari_pca = adjusted_rand_score(y_true, y_pred_pca)
-print(f"ARI (KMeans on PCA {n_pcs} PCs): {ari_pca:.4f}")
-
-Z_std = StandardScaler().fit_transform(Z)
-km_vae = KMeans(n_clusters=K, n_init=100, random_state=SEED)
-y_pred_vae = km_vae.fit_predict(Z_std)
-ari_vae = adjusted_rand_score(y_true, y_pred_vae)
-print(f"ARI (KMeans on VAE latent): {ari_vae:.4f}")
+#emb_vae = umap_embed(Z, SEED)
+#emb_pca = umap_embed(X_pca, SEED)
