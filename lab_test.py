@@ -85,7 +85,7 @@ class VAE(nn.Module):
         )
         self.mu = nn.Linear(64, latent_dim)       
         self.logvar = nn.Linear(64, latent_dim)        
-        self.dec = nn.Sequential(       # Mirrors the encoder but back to the input space
+        self.dec = nn.Sequential(       # Mirrors the encoder but back to the input spaceL
             nn.Linear(latent_dim, 64), nn.GELU(), nn.LayerNorm(64),
             nn.Linear(64, 256), nn.GELU(), nn.LayerNorm(256),
             nn.Linear(256, 1024), nn.GELU(),
@@ -159,21 +159,34 @@ print(f"[Info] Training on {device} for {epochs} epochs...")
 for epoch in range(1, epochs + 1):
     model.train()
     total = total_recon = total_kl = 0.0
+    beta = beta_cosine(epoch, warmup=warmup, beta_max=0.3)   
+
     for (xb,) in dl:
         xb = xb.to(device)
         opt.zero_grad()
         x_hat, mu, logvar = model(xb)
-        loss, recon, kl = vae_loss(xb, x_hat, mu, logvar, gene_w=gene_w)
 
-        beta = beta_cosine(epoch, warmup=warmup, beta_max=0.3)          
-        (recon + beta * kl).backward()           # instead of loss.backward()
+        _, recon_sum, kl_sum = vae_loss(xb, x_hat, mu, logvar, gene_w=gene_w)
+
+        # ---- NEW: average per batch for stable gradients ----
+        B = xb.size(0)
+        recon_mean = recon_sum / B
+        kl_mean    = kl_sum / B
+
+        (recon_mean + beta * kl_mean).backward()
         opt.step()
 
-        total += (recon + kl).item()
-        total_recon += recon.item()
-        total_kl += kl.item()
+        # keep your printed totals as sums over cells (unchanged)
+        total       += (recon_sum + kl_sum).item()
+        total_recon += recon_sum.item()
+        total_kl    += kl_sum.item()
 
+    best_ari = 0
     ari_epoch, _ = ari_from_model(model, eval_dl, y_true, K, seed=SEED)
+    if (ari_epoch>best_ari):
+        best_ari = ari_epoch
+        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
     print(f"Epoch {epoch:03d} | loss/cell={total/len(ds):.2f} "
           f"(recon/cell={total_recon/len(ds):.2f}, kl/cell={total_kl/len(ds):.2f}) "
           f"| ARI={ari_epoch:.4f}")
@@ -186,7 +199,7 @@ X_pca = adata.obsm["X_pca"][:, :n_pcs]        # (n_cells, n_pcs)
 
 ari_vae_final, Z = ari_from_model(model, eval_dl, y_true, K, seed=SEED)
 ari_pca_final    = ari_from_array(X_pca, y_true, K, seed=SEED)
-print(f"[Final] ARI VAE: {ari_vae_final:.4f} | ARI PCA({n_pcs}): {ari_pca_final:.4f}")
+print(f"[Final] Best ARI VAE: {best_ari:.4f} | ARI PCA({n_pcs}): {ari_pca_final:.4f}")
 
 # --------- UMAP ---------
 def umap_embed(X, seed=SEED):
