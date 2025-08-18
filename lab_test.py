@@ -78,16 +78,18 @@ print(f"[Sanity] n_cells = {len(ds)}, n_genes = {X.shape[1]},"
 class VAE(nn.Module):
     def __init__(self, input_dim, latent_dim):      # Constructor (# input features, latent dimensionality)
         super().__init__()
-        self.enc = nn.Sequential(       # Initializes two fully connected layers, ReLu Activation Function
-            nn.Linear(input_dim, 256), nn.GELU(),
-            nn.Linear(256, 64), nn.GELU()
+        self.enc = nn.Sequential(       # Initializes two fully connected layers, GeLU Activation Function
+            nn.Linear(input_dim, 1024), nn.GELU(),
+            nn.Linear(1024, 256), nn.GELU(),
+            nn.Linear(256, 64), nn.GELU(),
         )
         self.mu = nn.Linear(64, latent_dim)       
         self.logvar = nn.Linear(64, latent_dim)        
         self.dec = nn.Sequential(       # Mirrors the encoder but back to the input space
             nn.Linear(latent_dim, 64), nn.GELU(),
             nn.Linear(64, 256), nn.GELU(),
-            nn.Linear(256, input_dim)
+            nn.Linear(256, 1024), nn.GELU(),
+            nn.Linear(1024, input_dim)
         )
 
     def encode(self, x): # Encoder head (input cell vector x --> the parameters of a Gaussian over the latent z)
@@ -95,7 +97,7 @@ class VAE(nn.Module):
         return self.mu(h), self.logvar(h)
     
     def reparam(self, mu, logvar):
-        std = (0.5 * logvar).exp()
+        std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
     
@@ -138,16 +140,20 @@ def ari_from_array(X_rep, y_true, K, seed=SEED):
     return adjusted_rand_score(y_true, y_pred)
 
 # Training
-d_in, d_latent = X.shape[1], 2         # input features and latent dimensionality for VAE
-device = "cpu"                                     
+d_in, d_latent = X.shape[1], 8         # input features and latent dimensionality for VAE
 model = VAE(d_in, d_latent).to(device)          # moves parameters to evice
 opt = torch.optim.Adam(model.parameters(), lr=1e-3)         # solid default for Adam optimizer
 
 # --- Make a torch tensor for the per-gene weights ---
 gene_w = torch.from_numpy(w).to(device)   # shape (d_in,)
 
-epochs = 50
-warmup = 20
+epochs = 100
+warmup = 45
+
+def beta_cosine(epoch, warmup, beta_max=0.3):
+    if epoch >= warmup: 
+        return beta_max
+    return beta_max * 0.5 * (1 - math.cos(math.pi * epoch / warmup))
 
 print(f"[Info] Training on {device} for {epochs} epochs...")
 for epoch in range(1, epochs + 1):
@@ -159,7 +165,7 @@ for epoch in range(1, epochs + 1):
         x_hat, mu, logvar = model(xb)
         loss, recon, kl = vae_loss(xb, x_hat, mu, logvar, gene_w=gene_w)
 
-        beta = min(1.0, epoch / warmup)          # <- warm-up (optional)
+        beta = beta_cosine(epoch, warmup=40, beta_max=0.3)          
         (recon + beta * kl).backward()           # instead of loss.backward()
         opt.step()
 
@@ -172,6 +178,7 @@ for epoch in range(1, epochs + 1):
           f"(recon/cell={total_recon/len(ds):.2f}, kl/cell={total_kl/len(ds):.2f}) "
           f"| ARI={ari_epoch:.4f}")
     
+
 # --------- PCA and ARI alculation ---------
 n_pcs = 16 
 sc.tl.pca(adata, n_comps=n_pcs, svd_solver="arpack", random_state=SEED)
