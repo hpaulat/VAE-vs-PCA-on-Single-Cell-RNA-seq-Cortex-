@@ -79,14 +79,14 @@ class VAE(nn.Module):
     def __init__(self, input_dim, latent_dim):      # Constructor (# input features, latent dimensionality)
         super().__init__()
         self.enc = nn.Sequential(       # Initializes two fully connected layers, ReLu Activation Function
-            nn.Linear(input_dim, 256), nn.ReLU(),
-            nn.Linear(256, 64), nn.ReLU()
+            nn.Linear(input_dim, 256), nn.GELU(),
+            nn.Linear(256, 64), nn.GELU()
         )
         self.mu = nn.Linear(64, latent_dim)       
         self.logvar = nn.Linear(64, latent_dim)        
         self.dec = nn.Sequential(       # Mirrors the encoder but back to the input space
-            nn.Linear(latent_dim, 64), nn.ReLU(),
-            nn.Linear(64, 256), nn.ReLU(),
+            nn.Linear(latent_dim, 64), nn.GELU(),
+            nn.Linear(64, 256), nn.GELU(),
             nn.Linear(256, input_dim)
         )
 
@@ -138,7 +138,7 @@ def ari_from_array(X_rep, y_true, K, seed=SEED):
     return adjusted_rand_score(y_true, y_pred)
 
 # Training
-d_in, d_latent = X.shape[1], 8         # input features and latent dimensionality for VAE
+d_in, d_latent = X.shape[1], 2         # input features and latent dimensionality for VAE
 device = "cpu"                                     
 model = VAE(d_in, d_latent).to(device)          # moves parameters to evice
 opt = torch.optim.Adam(model.parameters(), lr=1e-3)         # solid default for Adam optimizer
