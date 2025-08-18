@@ -52,7 +52,7 @@ print("[HVG] using", adata.n_vars, "genes")
 disp = adata.var["dispersions_norm"].to_numpy()         # Per-gene normalized dispersion
 disp = np.nan_to_num(disp, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)      # Finds low quality values and sets to 0 --> asserts float32 type
 
-gamma = 3     # main knob
+gamma = 1     # main knob
 rng = np.ptp(disp) if np.ptp(disp) != 0 else 1.0  # calculates range for each gene
 w = 1.0 + gamma * (disp - disp.min()) / (rng + 1e-4)  # weights >= 1 for more variable genes
 w = w.astype(np.float32)
@@ -79,15 +79,15 @@ class VAE(nn.Module):
     def __init__(self, input_dim, latent_dim):      # Constructor (# input features, latent dimensionality)
         super().__init__()
         self.enc = nn.Sequential(       # Initializes two fully connected layers, GeLU Activation Function
-            nn.Linear(input_dim, 1024), nn.GELU(),
-            nn.Linear(1024, 256), nn.GELU(),
-            nn.Linear(256, 64), nn.GELU(),
+            nn.Linear(input_dim, 1024), nn.GELU(), nn.LayerNorm(1024),
+            nn.Linear(1024, 256), nn.GELU(), nn.LayerNorm(256),
+            nn.Linear(256, 64), nn.GELU(), 
         )
         self.mu = nn.Linear(64, latent_dim)       
         self.logvar = nn.Linear(64, latent_dim)        
         self.dec = nn.Sequential(       # Mirrors the encoder but back to the input space
-            nn.Linear(latent_dim, 64), nn.GELU(),
-            nn.Linear(64, 256), nn.GELU(),
+            nn.Linear(latent_dim, 64), nn.GELU(), nn.LayerNorm(64),
+            nn.Linear(64, 256), nn.GELU(), nn.LayerNorm(256),
             nn.Linear(256, 1024), nn.GELU(),
             nn.Linear(1024, input_dim)
         )
@@ -148,7 +148,7 @@ opt = torch.optim.Adam(model.parameters(), lr=1e-3)         # solid default for 
 gene_w = torch.from_numpy(w).to(device)   # shape (d_in,)
 
 epochs = 100
-warmup = 45
+warmup = 50
 
 def beta_cosine(epoch, warmup, beta_max=0.3):
     if epoch >= warmup: 
@@ -165,7 +165,7 @@ for epoch in range(1, epochs + 1):
         x_hat, mu, logvar = model(xb)
         loss, recon, kl = vae_loss(xb, x_hat, mu, logvar, gene_w=gene_w)
 
-        beta = beta_cosine(epoch, warmup=40, beta_max=0.3)          
+        beta = beta_cosine(epoch, warmup=warmup, beta_max=0.3)          
         (recon + beta * kl).backward()           # instead of loss.backward()
         opt.step()
 
