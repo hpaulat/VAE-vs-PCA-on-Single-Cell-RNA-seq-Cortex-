@@ -10,7 +10,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score
 import os, random, torch
 
-SEED = 0  # CHATGPT code to keep runs consistent
+SEED = 0  #  code to keep runs consistent
 os.environ["PYTHONHASHSEED"] = str(SEED)
 random.seed(SEED)
 np.random.seed(SEED)
@@ -140,7 +140,7 @@ def ari_from_array(X_rep, y_true, K, seed=SEED):
     return adjusted_rand_score(y_true, y_pred)
 
 # Training
-d_in, d_latent = X.shape[1], 8         # input features and latent dimensionality for VAE
+d_in, d_latent = X.shape[1], 6         # input features and latent dimensionality for VAE
 model = VAE(d_in, d_latent).to(device)          # moves parameters to evice
 opt = torch.optim.Adam(model.parameters(), lr=1e-3)         # solid default for Adam optimizer
 
@@ -181,11 +181,6 @@ for epoch in range(1, epochs + 1):
         total_recon += recon_sum.item()
         total_kl    += kl_sum.item()
 
-    best_ari = 0
-    ari_epoch, _ = ari_from_model(model, eval_dl, y_true, K, seed=SEED)
-    if (ari_epoch>best_ari):
-        best_ari = ari_epoch
-        best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
     print(f"Epoch {epoch:03d} | loss/cell={total/len(ds):.2f} "
           f"(recon/cell={total_recon/len(ds):.2f}, kl/cell={total_kl/len(ds):.2f}) "
