@@ -52,7 +52,7 @@ print("[HVG] using", adata.n_vars, "genes")
 disp = adata.var["dispersions_norm"].to_numpy()         # Per-gene normalized dispersion
 disp = np.nan_to_num(disp, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)      # Finds low quality values and sets to 0 --> asserts float32 type
 
-gamma = 1     # main knob
+gamma = 2     # main knob
 rng = np.ptp(disp) if np.ptp(disp) != 0 else 1.0  # calculates range for each gene
 w = 1.0 + gamma * (disp - disp.min()) / (rng + 1e-4)  # weights >= 1 for more variable genes
 w = w.astype(np.float32)
@@ -107,11 +107,15 @@ class VAE(nn.Module):
         x_hat = self.dec(z)
         return x_hat, mu, logvar
 
-def vae_loss(x, x_hat, mu, logvar, gene_w):
+def vae_loss(x, x_hat, mu, logvar, gene_w, kl_weight = 1.0):
     diff2 = (x_hat - x) ** 2
     recon = (diff2 * gene_w).sum() if gene_w is not None else diff2.sum()
-    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-    return recon + kl, recon, kl
+    
+    #kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    kl = 0.5 * (mu.pow(2) + logvar.exp() - logvar - 1).sum()
+
+    total = recon + kl_weight * kl
+    return total, recon, kl
 
 # Labels and ARI Calculator
 label_col = "label"
@@ -159,28 +163,23 @@ print(f"[Info] Training on {device} for {epochs} epochs...")
 for epoch in range(1, epochs + 1):
     model.train()
     total = total_recon = total_kl = 0.0
-    beta = beta_cosine(epoch, warmup=warmup, beta_max=0.3)   
+    beta = beta_cosine(epoch, warmup=warmup, beta_max=0.4)   
 
     for (xb,) in dl:
         xb = xb.to(device)
         opt.zero_grad()
         x_hat, mu, logvar = model(xb)
-
-        _, recon_sum, kl_sum = vae_loss(xb, x_hat, mu, logvar, gene_w=gene_w)
-
-        # ---- NEW: average per batch for stable gradients ----
+        loss_sum, recon_sum, kl_sum = vae_loss(xb, x_hat, mu, logvar, gene_w=gene_w, kl_weight=beta)
+        
         B = xb.size(0)
-        recon_mean = recon_sum / B
-        kl_mean    = kl_sum / B
-
-        (recon_mean + beta * kl_mean).backward()
+        (loss_sum / B).backward()
         opt.step()
 
-        # keep your printed totals as sums over cells (unchanged)
         total       += (recon_sum + kl_sum).item()
         total_recon += recon_sum.item()
         total_kl    += kl_sum.item()
 
+    ari_epoch, _ = ari_from_model(model, eval_dl, y_true, K, seed=SEED)
 
     print(f"Epoch {epoch:03d} | loss/cell={total/len(ds):.2f} "
           f"(recon/cell={total_recon/len(ds):.2f}, kl/cell={total_kl/len(ds):.2f}) "
@@ -194,12 +193,13 @@ X_pca = adata.obsm["X_pca"][:, :n_pcs]        # (n_cells, n_pcs)
 
 ari_vae_final, Z = ari_from_model(model, eval_dl, y_true, K, seed=SEED)
 ari_pca_final    = ari_from_array(X_pca, y_true, K, seed=SEED)
-print(f"[Final] Best ARI VAE: {best_ari:.4f} | ARI PCA({n_pcs}): {ari_pca_final:.4f}")
+print(f"[Final] ARI VAE: {ari_epoch:.4f} | ARI PCA({n_pcs}): {ari_pca_final:.4f}")
 
 # --------- UMAP ---------
 def umap_embed(X, seed=SEED):
     return umap.UMAP(n_neighbors=15, min_dist=0.1, metric="euclidean",
                      random_state=seed).fit_transform(X)
 
-#emb_vae = umap_embed(Z, SEED)
-#emb_pca = umap_embed(X_pca, SEED)
+emb_vae = umap_embed(Z, SEED)
+emb_pca = umap_embed(X_pca, SEED)
+plt.show()
