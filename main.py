@@ -144,9 +144,9 @@ opt = torch.optim.Adam(model.parameters(), lr=1e-3)         # solid default for 
 gene_w = torch.from_numpy(w).to(device)
 
 epochs = 50
-warmup = 10
+warmup = 15
 
-def beta_cosine(epoch, warmup, beta_max=0.1):
+def beta_cosine(epoch, warmup, beta_max=0.3):
     if epoch >= warmup: 
         return beta_max
     return beta_max * 0.5 * (1 - math.cos(math.pi * epoch / warmup))
@@ -164,13 +164,12 @@ for epoch in range(1, epochs + 1):
         loss_sum, recon_sum, kl_sum = vae_loss(xb, x_hat, mu, logvar, gene_w=gene_w, kl_weight=beta)
         
         B = xb.size(0)
-        (loss_sum / B).backward()
+        loss_sum.backward()
         opt.step()
 
-        total       += (recon_sum + beta * kl_sum).item()
-        total_recon += recon_sum.item()
-        total_kl    += kl_sum.item()
-
+        total       += (recon_sum.item() + beta * kl_sum.item()) * B
+        total_recon +=  recon_sum.item() * B
+        total_kl    +=  kl_sum.item() * B
     ari_epoch, _ = ari_from_model(model, eval_dl, y_true, K, seed=SEED)
 
     print(f"Epoch {epoch:03d} | loss/cell={total/len(ds):.2f} "
@@ -184,7 +183,7 @@ X_pca = adata.obsm["X_pca"][:, :n_pcs]        # (n_cells, n_pcs)
 
 ari_vae_final, Z = ari_from_model(model, eval_dl, y_true, K, seed=SEED)
 ari_pca_final    = ari_from_array(X_pca, y_true, K, seed=SEED)
-print(f"[Final] ARI VAE: {ari_epoch:.4f} | ARI PCA({n_pcs}): {ari_pca_final:.4f}")
+print(f"[Final] ARI VAE: {ari_vae_final:.4f} | ARI PCA({n_pcs}): {ari_pca_final:.4f}")
 
 
 # --------- UMAP ---------
@@ -194,6 +193,8 @@ def umap_embed(X, seed=SEED):
 
 emb_vae = umap_embed(Z, SEED)
 emb_pca = umap_embed(X_pca, SEED)
+adata.bosm["X_umap_vae"] = emb_vae
+adata.obsm["X_umap_pca"] = emb_pca
 
 label_names = list(labels.cat.categories)
 K = len(label_names)
