@@ -14,33 +14,82 @@ pip install -r requirements.txt
 
 ## How did I build it?
 
-Most of my current experience with data analysis has been with Seurat, so while the pipeline process was familiar to me, the actual implementation was a bit more difficult. I also don't have much experience coding machine learning models yet, so this required a lot of independent study.
+Most of my previous single-cell work was in Seurat, so I first focused on learning Scanpy/AnnData basics and mapped the pipeline I was used to into Python:
 
-I started by familiarizing myself with [ScanPy](https://scanpy.readthedocs.io/en/stable/tutorials/basics/clustering.html), and the [AnnData](https://anndata.readthedocs.io/en/latest/tutorials/notebooks/getting-started.html) object structure. I followed the ScanPy tutorial to normalize and log the counts data. To focus on informative features, I selected 2,000 HVGs and subsetted the matrix so the model only analyzes those genes.
+### Preprocessing
 
-I implemented an encoder MLP (2000 → 256 → 64), two linear heads for μ and logσ², and a mirrored decoder (latent → 64 → 256 → 2000). The choice for the number of neurons per layer was purely experimental, I tried a multitude of values to see what worked best. I leaned on PyTorch’s [nn.Module](https://docs.pytorch.org/tutorials/beginner/basics/buildmodel_tutorial.html) docs for model structure and the [Datasets & DataLoaders](https://docs.pytorch.org/tutorials/beginner/basics/data_tutorial.html?utm_source=chatgpt.com) tutorial for feeding batches cleanly. This [repo](https://github.com/Jackson-Kang/Pytorch-VAE-tutorial/blob/master/01_Variational_AutoEncoder.ipynb) by Jackson Kang also helped immensely.
+```
+# Save raw counts to adata.layers["counts"]
 
-The training loop uses Adam, mini-batches from DataLoader, and a standard VAE loss: MSE reconstruction (on normalized/log1p data) plus KL divergence between 𝑞𝜙(𝑧∣𝑥)and 𝑁(0,𝐼). Switching the model to train() during optimization and eval() for inference follows PyTorch best practices.
+sc.pp.normalize_total
+sc.pp.log1p
+sc.pp.highly_variable_genes(n_top_genes=2000, subset=True)
+```
 
-After training, I switched to model.eval() and iterated through the dataset with torch.no_grad() and shuffle=False to preserve row order, collecting posterior means μ into a dense matrix Z of shape (n_cells, d_latent). The DataLoader tutorial was helpful for the “dataset → iterable of batches” pattern.
+### Per-Gene Weighting for Reconstruction.
 
-I then ran: _umap.UMAP(n_neighbors=15, min_dist=0.1, metric="euclidean", random_state=0).fit_transform(Z)_
-to embed to 2-D and then colored points by ground-truth labels from adata.obs["label"]. The [UMAP docs](https://umap-learn.readthedocs.io/en/latest/parameters.html?utm_source=chatgpt.com) guided parameter choices (e.g., how min_dist affects cluster tightness and what random_state controls).
+I compute weights from normalized dispersion and rescale them to keep the average weight ≈ 1, so the weighted MSE remains comparable to unweighted MSE. A single knob gamma controls how strongly HVGs are emphasized.
 
-Before clustering I standardized Z per dimension (StandardScaler) because K-means is distance-based. Then I ran KMeans. I computed Adjusted Rand Index (ARI) with _sklearn.metrics.adjusted_rand_score(y_true, y_pred)_ to compare K-means labels against the known cell-type labels; the [scikit-learn](https://scikit-learn.org/stable/modules/generated/sklearn.cluster.KMeans.html?utm_source=chatgpt.com) docs explain both K-means parameters (like n_init) and ARI.
+### Model
 
-For a like-for-like baseline, I computed PCA on the same HVG-filtered matrix (matching the VAE latent size), then repeated the same K-means + ARI procedure on the PCA scores.
+- Encoder MLP: input → 1024 → 256 → 64 with GELU and LayerNorm
+- Two heads: μ and log(σ²)
+- Decoder (mirrored): latent → 64 → 256 → 1024 → input
+- Latent size: d_latent = 6
+
+### Objective & schedule.
+
+- Weighted MSE (on log-normalized HVGs) + KL
+- β-VAE cosine warm-up to beta_max (default 0.1) over warmup epochs
+- Adam (lr=1e-3), batch size 256, default 50 epochs
+
+### Evaluation.
+
+- Collect posterior means μ for all cells, Standardize, then KMeans with K = #unique labels
+- ARI between predicted clusters and true labels
+- Baseline: run PCA (same HVG matrix; keep first n_pcs) → Standardize → KMeans → ARI
+- Visualization: UMAP(μ) and UMAP(PCA) side-by-side, colored by adata.obs["label"] with a shared colormap
+
+### Reproducibility.
+
+Seeds are set across numpy, Python random, and PyTorch; deterministic flags are enabled
+
+### Choices
+
+- HVG-weighted reconstruction loss.
+  Emphasizes biologically variable genes while keeping overall loss scale stable (average weight ≈ 1).
+- β-annealing via cosine schedule.
+  Warms in the KL term to avoid early latent collapse; try beta_max in range [0.1, 0.5] and warmup in range [10, 100]
+- Reporting.
+  Epoch logs report objective/recon/β·KL per cell (matching what’s optimized) and ARI. Final print shows [Final] ARI VAE and ARI PCA(n_pcs).
+
+### Knobs to tune quickly
+
+- d_latent (e.g., 4/8/12)
+- beta_max, warmup (β schedule)
+- gamma (HVG weight strength)
+- n_pcs for the PCA baseline
+- n_neighbors, min_dist in UMAP
+
+### Future work
+
+- Validation split + early stopping on ARI(val). Track ARI(val) and keep the best checkpoint.
+- Swap MSE for NB on raw counts to model over-dispersion; keep the current log-normalized MSE path as a baseline.
+- Cluster–label heatmaps.
+- Graph Training
 
 ## Lessons Learned
 
-Something that really helped me with this project was just throwing myself into it and learning as I went. As I mentioned, I don't have a ton of experience with coding neural networks, and the knowledge I do have is much more general than VAE's specifically. This made this project a bit daunting at first. Still, once I threw myself into it I felt like everything became much more manageable. The best way to learn is by doing. I was really happy to code in Python as well, since it had been a little while.
+Jumping from Seurat to a PyTorch VAE in Scanpy was a bit difficult at first, especially due to me having less experience coding neural networks. It took some time, but thankfully there were a plethora of resources and documentation online to help me get started (see below). Working through everything really deepend my understanding in a lot of places, which I think will really help me as the new school year starts (I'm taking a lot of machine-learning intensive courses). There is still a lot of ways that I can improve on my work, but I'm really happy with the progress I was able to make in this amount of time.
 
 ## Helpful Resources
 
-https://medium.com/@weidagang/demystifying-neural-networks-variational-autoencoders-6a44e75d0271
+https://medium.com@weidagangdemystifying-neural-networks-variational-autoencoders-6a44e75d0271
 
 https://www.youtube.com/watch?v=9zKuYvjFFS8
 
 https://www.youtube.com/watch?v=uvyG9yLuNSE
 
 https://academic.oup.com/bioinformatics/article/36/16/4415/5838187
+
+https://github.com/lasersonlab/single-cell-experiments/blob/master/README.md

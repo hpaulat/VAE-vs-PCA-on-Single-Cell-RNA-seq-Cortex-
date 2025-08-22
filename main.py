@@ -144,9 +144,9 @@ opt = torch.optim.Adam(model.parameters(), lr=1e-3)         # solid default for 
 gene_w = torch.from_numpy(w).to(device)
 
 epochs = 50
-warmup = 15
+warmup = 40
 
-def beta_cosine(epoch, warmup, beta_max=0.3):
+def beta_cosine(epoch, warmup, beta_max=0.1):
     if epoch >= warmup: 
         return beta_max
     return beta_max * 0.5 * (1 - math.cos(math.pi * epoch / warmup))
@@ -193,19 +193,13 @@ def umap_embed(X, seed=SEED):
 
 emb_vae = umap_embed(Z, SEED)
 emb_pca = umap_embed(X_pca, SEED)
-adata.bosm["X_umap_vae"] = emb_vae
+adata.obsm["X_umap_vae"] = emb_vae
 adata.obsm["X_umap_pca"] = emb_pca
 
 label_names = list(labels.cat.categories)
 K = len(label_names)
 
-if K <= 20:
-    cmap = plt.colormaps.get_cmap("tab20")
-elif K <= 256:
-    cmap = plt.colormaps.get_cmap("gist_ncar")
-else:
-    cmap = plt.colormaps.get_cmap("hsv")
-
+cmap = plt.colormaps.get_cmap("tab20")
 point_colors = cmap(y_true) 
 
 fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True, sharex=True, sharey=True)
