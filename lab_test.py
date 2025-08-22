@@ -154,7 +154,7 @@ gene_w = torch.from_numpy(w).to(device)   # shape (d_in,)
 epochs = 100
 warmup = 50
 
-def beta_cosine(epoch, warmup, beta_max=0.3):
+def beta_cosine(epoch, warmup, beta_max=0.2):
     if epoch >= warmup: 
         return beta_max
     return beta_max * 0.5 * (1 - math.cos(math.pi * epoch / warmup))
